@@ -20,12 +20,22 @@ type ServerConfig struct {
 }
 
 type DetectorConfig struct {
-	WinStrideX   int     `yaml:"win_stride_x"`
-	WinStrideY   int     `yaml:"win_stride_y"`
-	PaddingX     int     `yaml:"padding_x"`
-	PaddingY     int     `yaml:"padding_y"`
-	Scale        float64 `yaml:"scale"`
+	WinStrideX int `yaml:"win_stride_x"`
+	WinStrideY int `yaml:"win_stride_y"`
+	PaddingX   int `yaml:"padding_x"`
+	PaddingY   int `yaml:"padding_y"`
+	Scale      float64 `yaml:"scale"`
+	// HitThreshold — минимальный score SVM для одного окна.
 	HitThreshold float64 `yaml:"hit_threshold"`
+	// FinalThreshold — минимальное число перекрывающихся окон после группировки
+	// (OpenCV groupRectangles). Значение 2 означает: прямоугольник выживает,
+	// если его поддерживают >= 3 перекрывающихся окна. Поднимите до 3-5 при
+	// большом числе ложных срабатываний.
+	FinalThreshold float64 `yaml:"final_threshold"`
+	// NMSThreshold — порог IoU для NMS-фильтрации после группировки.
+	// Дублирующиеся боксы с IoU > порога удаляются, остаётся тот, у которого
+	// больше площадь. Рекомендуемое значение: 0.65.
+	NMSThreshold float64 `yaml:"nms_threshold"`
 	MinWidth     int     `yaml:"min_width"`
 	MinHeight    int     `yaml:"min_height"`
 }
@@ -117,6 +127,12 @@ func (c *Config) applyDefaults() {
 	}
 	if d.Scale == 0 {
 		d.Scale = 1.05
+	}
+	if d.FinalThreshold == 0 {
+		d.FinalThreshold = 2
+	}
+	if d.NMSThreshold == 0 {
+		d.NMSThreshold = 0.65
 	}
 	if d.MinWidth == 0 {
 		d.MinWidth = 48
