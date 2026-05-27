@@ -1,15 +1,12 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"image"
-	"io"
 	"log/slog"
-	"net/http"
 	"strings"
 
 	"github.com/aero89/detectors/internal/homography"
+	"github.com/gofiber/fiber/v2"
 	"gocv.io/x/gocv"
 )
 
@@ -26,7 +23,7 @@ type DetectResponse struct {
 }
 
 // Detect принимает изображение и возвращает список обнаруженных людей
-// с их позициями как в пикселях, так и в координатах помещения.
+// с позициями в пикселях и в координатах помещения.
 //
 // Принимает изображение двумя способами:
 //   - multipart/form-data: поле "image"
@@ -36,17 +33,15 @@ type DetectResponse struct {
 //
 //	curl -X POST http://localhost:8080/detect \
 //	     --data-binary @frame.jpg -H "Content-Type: image/jpeg"
-func (h *DetectHandler) Detect(w http.ResponseWriter, r *http.Request) {
-	imgBytes, err := readImageBytes(r)
+func (h *DetectHandler) Detect(c *fiber.Ctx) error {
+	imgBytes, err := readImageBytes(c)
 	if err != nil {
-		httpError(w, fmt.Sprintf("read image: %v", err), http.StatusBadRequest)
-		return
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "read image: " + err.Error()})
 	}
 
 	mat, err := gocv.IMDecode(imgBytes, gocv.IMReadColor)
 	if err != nil || mat.Empty() {
-		httpError(w, "failed to decode image", http.StatusBadRequest)
-		return
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "failed to decode image"})
 	}
 	defer mat.Close()
 
@@ -66,33 +61,29 @@ func (h *DetectHandler) Detect(w http.ResponseWriter, r *http.Request) {
 	slog.Info("detect", "persons", len(persons),
 		"frame_w", mat.Cols(), "frame_h", mat.Rows())
 
-	resp := DetectResponse{
+	return c.JSON(DetectResponse{
 		Persons:   persons,
 		FrameSize: image.Point{X: mat.Cols(), Y: mat.Rows()},
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	})
 }
 
-func readImageBytes(r *http.Request) ([]byte, error) {
-	ct := r.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "multipart/form-data") {
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
+func readImageBytes(c *fiber.Ctx) ([]byte, error) {
+	ct := c.Get(fiber.HeaderContentType)
+	if strings.HasPrefix(ct, fiber.MIMEMultipartForm) {
+		file, err := c.FormFile("image")
+		if err != nil {
 			return nil, err
 		}
-		f, _, err := r.FormFile("image")
+		f, err := file.Open()
 		if err != nil {
-			return nil, fmt.Errorf("field 'image' not found: %w", err)
+			return nil, err
 		}
 		defer f.Close()
-		return io.ReadAll(f)
+		buf := make([]byte, file.Size)
+		if _, err := f.Read(buf); err != nil {
+			return nil, err
+		}
+		return buf, nil
 	}
-	defer r.Body.Close()
-	return io.ReadAll(r.Body)
-}
-
-func httpError(w http.ResponseWriter, msg string, code int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	return c.Body(), nil
 }

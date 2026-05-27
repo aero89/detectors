@@ -1,16 +1,14 @@
 package main
 
 import (
-	"context"
-	"flag"
 	"log/slog"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
+	"flag"
 
 	"github.com/aero89/detectors/internal/homography"
+	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/logger"
+	"github.com/gofiber/fiber/v2/middleware/recover"
 )
 
 func main() {
@@ -40,34 +38,20 @@ func main() {
 
 	dh := &DetectHandler{detector: det, homography: hom}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /detect", dh.Detect)
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	app := fiber.New(fiber.Config{
+		AppName: "detectors",
+	})
+	app.Use(recover.New())
+	app.Use(logger.New())
+
+	app.Post("/detect", dh.Detect)
+	app.Get("/health", func(c *fiber.Ctx) error {
+		return c.SendStatus(fiber.StatusOK)
 	})
 
-	srv := &http.Server{
-		Addr:         cfg.Server.Addr,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-	}
-
-	go func() {
-		slog.Info("server started", "addr", cfg.Server.Addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server error", "err", err)
-			os.Exit(1)
-		}
-	}()
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		slog.Error("shutdown error", "err", err)
+	slog.Info("server starting", "addr", cfg.Server.Addr)
+	if err := app.Listen(cfg.Server.Addr); err != nil {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
 	}
 }
