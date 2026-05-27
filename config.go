@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/aero89/detectors/internal/homography"
@@ -62,17 +63,45 @@ func (c *CalibrationConfig) toHomographyPoints() []homography.CalibrationPoint {
 	return out
 }
 
-func LoadConfig(path string) (*Config, error) {
+// LoadConfig загружает конфиг из файла.
+// Приоритет пути: флаг -config → переменная окружения CONFIG_PATH → "config.yaml".
+// Если файл не найден — возвращает конфиг с дефолтными значениями (без калибровки).
+func LoadConfig(flagPath string) (*Config, error) {
+	path := resolveConfigPath(flagPath)
+
 	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+	if os.IsNotExist(err) {
+		var cfg Config
+		cfg.applyDefaults()
+		slog.Warn("config file not found, using defaults", "path", path)
+		return &cfg, nil
 	}
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	cfg.applyDefaults()
+	slog.Info("config loaded", "path", path)
 	return &cfg, nil
+}
+
+// resolveConfigPath определяет путь к конфигу:
+// 1. Флаг -config (если не дефолтный "config.yaml", значит задан явно)
+// 2. CONFIG_PATH из окружения
+// 3. "config.yaml" по умолчанию
+func resolveConfigPath(flagPath string) string {
+	if flagPath != "config.yaml" {
+		// Флаг был задан явно
+		return flagPath
+	}
+	if env := os.Getenv("CONFIG_PATH"); env != "" {
+		return env
+	}
+	return flagPath
 }
 
 func (c *Config) applyDefaults() {
