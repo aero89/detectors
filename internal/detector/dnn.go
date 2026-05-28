@@ -87,7 +87,7 @@ func (d *dnnDetector) Detect(imgBytes []byte, withDebug bool) (DetectResult, err
 
 	d.net.SetInput(blob, "")
 
-	outNames := d.net.GetUnconnectedOutLayersNames()
+	outNames := unconnectedLayerNames(d.net)
 	outputs := d.net.ForwardLayers(outNames)
 	defer func() {
 		for i := range outputs {
@@ -184,6 +184,21 @@ func (d *dnnDetector) parseDetections(outputs []gocv.Mat, workW, workH int, scal
 		})
 	}
 	return persons, boxes, scores
+}
+
+// unconnectedLayerNames возвращает имена выходных слоёв сети.
+// gocv v0.35 не имеет GetUnconnectedOutLayersNames, поэтому комбинируем:
+// GetUnconnectedOutLayers() → индексы (1-based) + GetLayerNames() → все имена.
+func unconnectedLayerNames(net gocv.Net) []string {
+	indices := net.GetUnconnectedOutLayers() // []int, 1-based
+	allNames := net.GetLayerNames()          // []string, 0-based
+	names := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		if idx > 0 && idx <= len(allNames) {
+			names = append(names, allNames[idx-1])
+		}
+	}
+	return names
 }
 
 func loadClassNames(path string) ([]string, error) {
