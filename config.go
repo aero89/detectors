@@ -28,16 +28,17 @@ type DetectorConfig struct {
 	// HitThreshold — минимальный score SVM для одного окна.
 	HitThreshold float64 `yaml:"hit_threshold"`
 	// FinalThreshold — минимальное число перекрывающихся окон после группировки
-	// (OpenCV groupRectangles). Значение 2 означает: прямоугольник выживает,
-	// если его поддерживают >= 3 перекрывающихся окна. Поднимите до 3-5 при
-	// большом числе ложных срабатываний.
+	// (OpenCV groupRectangles). 0 = без группировки (вернёт сотни тысяч дублей!).
 	FinalThreshold float64 `yaml:"final_threshold"`
-	// NMSThreshold — порог IoU для NMS-фильтрации после группировки.
-	// Дублирующиеся боксы с IoU > порога удаляются, остаётся тот, у которого
-	// больше площадь. Рекомендуемое значение: 0.65.
+	// NMSThreshold — порог IoU для NMS. Боксы с overlap > порога удаляются.
 	NMSThreshold float64 `yaml:"nms_threshold"`
-	MinWidth     int     `yaml:"min_width"`
-	MinHeight    int     `yaml:"min_height"`
+	// MaxWidth — максимальная ширина кадра перед детекцией (пикселей).
+	// Кадр масштабируется вниз если шире. Основной рычаг скорости:
+	// 640 даёт 10–15x ускорение против 1920. Bbox-ы масштабируются обратно.
+	// 0 = без ресайза (не рекомендуется для кадров > 800px).
+	MaxWidth  int `yaml:"max_width"`
+	MinWidth  int `yaml:"min_width"`
+	MinHeight int `yaml:"min_height"`
 }
 
 // CalibrationConfig задаёт соответствие точек изображения и помещения.
@@ -120,10 +121,10 @@ func (c *Config) applyDefaults() {
 	}
 	d := &c.Detector
 	if d.WinStrideX == 0 {
-		d.WinStrideX = 8
+		d.WinStrideX = 16
 	}
 	if d.WinStrideY == 0 {
-		d.WinStrideY = 8
+		d.WinStrideY = 16
 	}
 	if d.Scale == 0 {
 		d.Scale = 1.05
@@ -133,6 +134,9 @@ func (c *Config) applyDefaults() {
 	}
 	if d.NMSThreshold == 0 {
 		d.NMSThreshold = 0.65
+	}
+	if d.MaxWidth == 0 {
+		d.MaxWidth = 640
 	}
 	if d.MinWidth == 0 {
 		d.MinWidth = 48
