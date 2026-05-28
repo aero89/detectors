@@ -73,6 +73,8 @@ func (d *Detector) Detect(img gocv.Mat) []Person {
 
 	persons := make([]Person, 0, len(rects))
 	for _, r := range rects {
+		// Коррекция смещения/размера HOG bbox
+		r = adjustRect(r, c.BboxXAdjust, c.BboxYAdjust, c.BboxWScale, c.BboxHScale)
 		// Масштабируем bbox обратно в координаты оригинального кадра
 		if scale != 1.0 {
 			r = scaleRect(r, 1.0/scale)
@@ -86,6 +88,20 @@ func (d *Detector) Detect(img gocv.Mat) []Person {
 		})
 	}
 	return persons
+}
+
+// adjustRect корректирует bbox HOG-детектора.
+// xAdj/yAdj — сдвиг левого верхнего угла в долях ширины/высоты.
+// wScale/hScale — масштаб размеров.
+func adjustRect(r image.Rectangle, xAdj, yAdj, wScale, hScale float64) image.Rectangle {
+	w := float64(r.Dx())
+	h := float64(r.Dy())
+	x := float64(r.Min.X) + xAdj*w
+	y := float64(r.Min.Y) + yAdj*h
+	return image.Rectangle{
+		Min: image.Point{X: int(x), Y: int(y)},
+		Max: image.Point{X: int(x + w*wScale), Y: int(y + h*hScale)},
+	}
 }
 
 func scaleRect(r image.Rectangle, s float64) image.Rectangle {

@@ -36,7 +36,17 @@ type DetectorConfig struct {
 	// Кадр масштабируется вниз если шире. Основной рычаг скорости:
 	// 640 даёт 10–15x ускорение против 1920. Bbox-ы масштабируются обратно.
 	// 0 = без ресайза (не рекомендуется для кадров > 800px).
-	MaxWidth  int `yaml:"max_width"`
+	MaxWidth int `yaml:"max_width"`
+
+	// Коррекция bbox HOG-детектора — значения в долях от размера бокса.
+	// HOG bbox обычно немного больше и смещён от реального силуэта.
+	// Стандартные значения OpenCV: x=0.1, y=0.07, w=0.8, h=0.8.
+	// Сдвиньте BboxXAdjust/BboxYAdjust вправо/вниз если бокс уходит влево/вверх.
+	BboxXAdjust float64 `yaml:"bbox_x_adjust"` // сдвиг Min.X вправо (доля ширины)
+	BboxYAdjust float64 `yaml:"bbox_y_adjust"` // сдвиг Min.Y вниз (доля высоты)
+	BboxWScale  float64 `yaml:"bbox_w_scale"`  // масштаб ширины (< 1 — сужает)
+	BboxHScale  float64 `yaml:"bbox_h_scale"`  // масштаб высоты (< 1 — укорачивает)
+
 	MinWidth  int `yaml:"min_width"`
 	MinHeight int `yaml:"min_height"`
 }
@@ -137,6 +147,18 @@ func (c *Config) applyDefaults() {
 	}
 	if d.MaxWidth == 0 {
 		d.MaxWidth = 640
+	}
+	if d.BboxXAdjust == 0 {
+		d.BboxXAdjust = 0.1
+	}
+	if d.BboxYAdjust == 0 {
+		d.BboxYAdjust = 0.07
+	}
+	if d.BboxWScale == 0 {
+		d.BboxWScale = 0.8
+	}
+	if d.BboxHScale == 0 {
+		d.BboxHScale = 0.8
 	}
 	if d.MinWidth == 0 {
 		d.MinWidth = 48
