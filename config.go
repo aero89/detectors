@@ -20,33 +20,44 @@ type ServerConfig struct {
 }
 
 type DetectorConfig struct {
-	WinStrideX int `yaml:"win_stride_x"`
-	WinStrideY int `yaml:"win_stride_y"`
-	PaddingX   int `yaml:"padding_x"`
-	PaddingY   int `yaml:"padding_y"`
-	Scale      float64 `yaml:"scale"`
-	// HitThreshold — минимальный score SVM для одного окна.
-	HitThreshold float64 `yaml:"hit_threshold"`
-	// FinalThreshold — минимальное число перекрывающихся окон после группировки
-	// (OpenCV groupRectangles). 0 = без группировки (вернёт сотни тысяч дублей!).
-	FinalThreshold float64 `yaml:"final_threshold"`
-	// NMSThreshold — порог IoU для NMS. Боксы с overlap > порога удаляются.
-	NMSThreshold float64 `yaml:"nms_threshold"`
-	// MaxWidth — максимальная ширина кадра перед детекцией (пикселей).
-	// Кадр масштабируется вниз если шире. Основной рычаг скорости:
-	// 640 даёт 10–15x ускорение против 1920. Bbox-ы масштабируются обратно.
-	// 0 = без ресайза (не рекомендуется для кадров > 800px).
+	// MaxWidth — ширина кадра для детекции (0 = без ресайза).
+	// Bbox-ы масштабируются обратно в оригинальные координаты автоматически.
 	MaxWidth int `yaml:"max_width"`
 
-	// Коррекция bbox HOG-детектора — значения в долях от размера бокса.
-	// HOG bbox обычно немного больше и смещён от реального силуэта.
-	// Стандартные значения OpenCV: x=0.1, y=0.07, w=0.8, h=0.8.
-	// Сдвиньте BboxXAdjust/BboxYAdjust вправо/вниз если бокс уходит влево/вверх.
-	BboxXAdjust float64 `yaml:"bbox_x_adjust"` // сдвиг Min.X вправо (доля ширины)
-	BboxYAdjust float64 `yaml:"bbox_y_adjust"` // сдвиг Min.Y вниз (доля высоты)
-	BboxWScale  float64 `yaml:"bbox_w_scale"`  // масштаб ширины (< 1 — сужает)
-	BboxHScale  float64 `yaml:"bbox_h_scale"`  // масштаб высоты (< 1 — укорачивает)
+	// BackSub — параметры вычитания фона (MOG2).
+	// Рекомендуется для статичной камеры в помещении: работает с любым углом,
+	// не зависит от формы силуэта человека.
+	BackSub BackSubConfig `yaml:"back_sub"`
 
+	// Contour — фильтрация найденных контуров переднего плана.
+	Contour ContourConfig `yaml:"contour"`
+}
+
+// BackSubConfig — параметры BackgroundSubtractorMOG2.
+type BackSubConfig struct {
+	// History — количество кадров для построения модели фона.
+	// Больше → стабильнее фон, но дольше инициализация.
+	History int `yaml:"history"`
+	// VarThreshold — порог дисперсии. Меньше → чувствительнее, больше шума.
+	VarThreshold float64 `yaml:"var_threshold"`
+	// DetectShadows — классифицировать тени отдельно (замедляет, обычно не нужно).
+	DetectShadows bool `yaml:"detect_shadows"`
+
+	// MorphErodeSize — размер ядра эрозии (убирает мелкий шум). 0 = выключено.
+	MorphErodeSize int `yaml:"morph_erode_size"`
+	// MorphDilateSize — размер ядра дилатации (заполняет дыры в маске человека).
+	MorphDilateSize int `yaml:"morph_dilate_size"`
+}
+
+// ContourConfig — правила фильтрации контуров переднего плана.
+type ContourConfig struct {
+	// MinArea / MaxArea — площадь контура в пикселях рабочего кадра.
+	// Слишком маленькие — шум; слишком большие — группа людей или артефакт.
+	MinArea float64 `yaml:"min_area"`
+	MaxArea float64 `yaml:"max_area"`
+
+	// MinWidth / MinHeight — минимальный размер bbox контура в пикселях
+	// оригинального кадра (после масштабирования обратно).
 	MinWidth  int `yaml:"min_width"`
 	MinHeight int `yaml:"min_height"`
 }
@@ -85,8 +96,8 @@ func (c *CalibrationConfig) toHomographyPoints() []homography.CalibrationPoint {
 }
 
 // LoadConfig загружает конфиг из файла.
-// Приоритет пути: флаг -config → переменная окружения CONFIG_PATH → "config.yaml".
-// Если файл не найден — возвращает конфиг с дефолтными значениями (без калибровки).
+// Приоритет пути: флаг -config → CONFIG_PATH → "config.yaml".
+// Если файл не найден — запускается с дефолтами (без калибровки).
 func LoadConfig(flagPath string) (*Config, error) {
 	path := resolveConfigPath(flagPath)
 
@@ -110,13 +121,8 @@ func LoadConfig(flagPath string) (*Config, error) {
 	return &cfg, nil
 }
 
-// resolveConfigPath определяет путь к конфигу:
-// 1. Флаг -config (если не дефолтный "config.yaml", значит задан явно)
-// 2. CONFIG_PATH из окружения
-// 3. "config.yaml" по умолчанию
 func resolveConfigPath(flagPath string) string {
 	if flagPath != "config.yaml" {
-		// Флаг был задан явно
 		return flagPath
 	}
 	if env := os.Getenv("CONFIG_PATH"); env != "" {
@@ -130,40 +136,33 @@ func (c *Config) applyDefaults() {
 		c.Server.Addr = ":8080"
 	}
 	d := &c.Detector
-	if d.WinStrideX == 0 {
-		d.WinStrideX = 16
-	}
-	if d.WinStrideY == 0 {
-		d.WinStrideY = 16
-	}
-	if d.Scale == 0 {
-		d.Scale = 1.05
-	}
-	if d.FinalThreshold == 0 {
-		d.FinalThreshold = 2
-	}
-	if d.NMSThreshold == 0 {
-		d.NMSThreshold = 0.65
-	}
 	if d.MaxWidth == 0 {
-		d.MaxWidth = 1280
+		d.MaxWidth = 960
 	}
-	if d.BboxXAdjust == 0 {
-		d.BboxXAdjust = 0.1
+	bs := &d.BackSub
+	if bs.History == 0 {
+		bs.History = 500
 	}
-	if d.BboxYAdjust == 0 {
-		d.BboxYAdjust = 0.07
+	if bs.VarThreshold == 0 {
+		bs.VarThreshold = 25
 	}
-	if d.BboxWScale == 0 {
-		d.BboxWScale = 0.8
+	if bs.MorphErodeSize == 0 {
+		bs.MorphErodeSize = 3
 	}
-	if d.BboxHScale == 0 {
-		d.BboxHScale = 0.8
+	if bs.MorphDilateSize == 0 {
+		bs.MorphDilateSize = 15
 	}
-	if d.MinWidth == 0 {
-		d.MinWidth = 48
+	ct := &d.Contour
+	if ct.MinArea == 0 {
+		ct.MinArea = 500
 	}
-	if d.MinHeight == 0 {
-		d.MinHeight = 96
+	if ct.MaxArea == 0 {
+		ct.MaxArea = 80000
+	}
+	if ct.MinWidth == 0 {
+		ct.MinWidth = 30
+	}
+	if ct.MinHeight == 0 {
+		ct.MinHeight = 30
 	}
 }

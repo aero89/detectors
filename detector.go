@@ -2,6 +2,8 @@ package main
 
 import (
 	"image"
+	"image/color"
+	"sync"
 
 	"github.com/aero89/detectors/internal/homography"
 	"gocv.io/x/gocv"
@@ -10,138 +12,167 @@ import (
 // Person содержит результат детекции одного человека.
 type Person struct {
 	// BoundingBox и ImagePoint — в координатах оригинального кадра.
-	BoundingBox image.Rectangle     `json:"bounding_box"`
-	// ImagePoint — нижний центр bounding box (проекция ног на пол).
-	ImagePoint  image.Point         `json:"image_point"`
+	BoundingBox image.Rectangle `json:"bounding_box"`
+	// ImagePoint — нижний центр bbox (проекция ног/основания на пол).
+	ImagePoint image.Point `json:"image_point"`
 	// RoomPoint — координаты в помещении (метры). nil если калибровка не задана.
-	RoomPoint   *homography.Point2D `json:"room_point,omitempty"`
+	RoomPoint *homography.Point2D `json:"room_point,omitempty"`
 }
 
-// DetectResult — полный результат детекции, включая опциональный дебаг.
+// DetectResult — результат детекции с опциональным дебагом.
 type DetectResult struct {
-	Persons []Person    `json:"persons"`
-	Debug   *DebugInfo  `json:"debug,omitempty"`
+	Persons []Person   `json:"persons"`
+	Debug   *DebugInfo `json:"debug,omitempty"`
 }
 
-// DebugInfo показывает промежуточные данные каждого шага пайплайна.
-// Используйте ?debug=true чтобы получить его в ответе.
+// DebugInfo — промежуточные данные для диагностики.
 type DebugInfo struct {
-	// Размер кадра, поданного в HOG (после ресайза)
-	WorkingSize image.Point `json:"working_size"`
-	// Коэффициент масштабирования: working / original
-	// 1.0 = ресайз не применялся
-	WorkingScale float64 `json:"working_scale"`
-	// Сырые боксы от HOG — в координатах working (до любых поправок)
-	RawRectsWorking []image.Rectangle `json:"raw_rects_working"`
-	// После NMS, в координатах working (до bbox-коррекции и scale-back)
-	AfterNMSWorking []image.Rectangle `json:"after_nms_working"`
-	// После bbox-коррекции, в координатах working
-	AfterAdjustWorking []image.Rectangle `json:"after_adjust_working"`
-	// Итоговые боксы в координатах оригинального кадра
-	FinalRectsOriginal []image.Rectangle `json:"final_rects_original"`
+	WorkingSize  image.Point `json:"working_size"`
+	WorkingScale float64     `json:"working_scale"`
+	// ForegroundPixels — количество пикселей переднего плана после морфологии
+	ForegroundPixels int `json:"foreground_pixels"`
+	// RawContours — bbox каждого контура до фильтрации (в working-координатах)
+	RawContours []image.Rectangle `json:"raw_contours_working"`
+	// FinalRects — итоговые bbox в оригинальных координатах
+	FinalRects []image.Rectangle `json:"final_rects_original"`
 }
 
-// Detector детектирует людей с помощью HOG + LinearSVM.
+// Detector — детектор людей на основе вычитания фона (MOG2).
+// Оптимален для статичной камеры в помещении: не зависит от угла съёмки
+// и формы силуэта, в отличие от HOG.
 type Detector struct {
-	hog gocv.HOGDescriptor
-	cfg DetectorConfig
+	mu     sync.Mutex
+	backSub gocv.BackgroundSubtractorMOG2
+	cfg    DetectorConfig
 }
 
 func NewDetector(cfg DetectorConfig) *Detector {
-	hog := gocv.NewHOGDescriptor()
-	hog.SetSVMDetector(gocv.HOGDefaultPeopleDetector())
-	return &Detector{hog: hog, cfg: cfg}
+	bs := cfg.BackSub
+	backSub := gocv.NewBackgroundSubtractorMOG2WithParams(
+		bs.History,
+		bs.VarThreshold,
+		bs.DetectShadows,
+	)
+	return &Detector{backSub: backSub, cfg: cfg}
 }
 
 func (d *Detector) Close() {
-	d.hog.Close()
+	d.backSub.Close()
 }
 
-// Detect запускает пайплайн детекции.
-// withDebug=true заполняет DetectResult.Debug промежуточными данными каждого шага.
+// Reset сбрасывает модель фона — полезно при изменении освещения или перестановке мебели.
+func (d *Detector) Reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.backSub.Close()
+	bs := d.cfg.BackSub
+	d.backSub = gocv.NewBackgroundSubtractorMOG2WithParams(
+		bs.History,
+		bs.VarThreshold,
+		bs.DetectShadows,
+	)
+}
+
+// Detect обрабатывает кадр: вычитает фон, находит контуры движущихся объектов.
+// Первые ~History кадров модель фона ещё строится — детекция постепенно стабилизируется.
 func (d *Detector) Detect(img gocv.Mat, withDebug bool) DetectResult {
-	c := d.cfg
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	cfg := d.cfg
 
 	// Шаг 1: ресайз до max_width
 	scale := 1.0
 	working := img
 	var resized gocv.Mat
-	if c.MaxWidth > 0 && img.Cols() > c.MaxWidth {
-		scale = float64(c.MaxWidth) / float64(img.Cols())
+	if cfg.MaxWidth > 0 && img.Cols() > cfg.MaxWidth {
+		scale = float64(cfg.MaxWidth) / float64(img.Cols())
 		newH := int(float64(img.Rows()) * scale)
 		resized = gocv.NewMat()
-		gocv.Resize(img, &resized, image.Point{X: c.MaxWidth, Y: newH}, 0, 0, gocv.InterpolationLinear)
+		gocv.Resize(img, &resized, image.Point{X: cfg.MaxWidth, Y: newH}, 0, 0, gocv.InterpolationLinear)
 		working = resized
 		defer resized.Close()
 	}
 
-	workingSize := image.Point{X: working.Cols(), Y: working.Rows()}
+	// Шаг 2: вычитание фона → маска переднего плана
+	fgMask := gocv.NewMat()
+	defer fgMask.Close()
+	d.backSub.Apply(working, &fgMask)
 
-	// Шаг 2: HOG
-	winStride := image.Point{X: c.WinStrideX, Y: c.WinStrideY}
-	padding := image.Point{X: c.PaddingX, Y: c.PaddingY}
-	rawRects := d.hog.DetectMultiScaleWithParams(
-		working,
-		c.HitThreshold,
-		winStride,
-		padding,
-		c.Scale,
-		c.FinalThreshold,
-		false,
-	)
+	// Шаг 3: морфология — убираем шум и заполняем дыры внутри людей
+	bs := cfg.BackSub
+	if bs.MorphErodeSize > 0 {
+		kernel := gocv.GetStructuringElement(gocv.MorphRect,
+			image.Point{X: bs.MorphErodeSize, Y: bs.MorphErodeSize})
+		gocv.Erode(fgMask, &fgMask, kernel)
+		kernel.Close()
+	}
+	if bs.MorphDilateSize > 0 {
+		kernel := gocv.GetStructuringElement(gocv.MorphRect,
+			image.Point{X: bs.MorphDilateSize, Y: bs.MorphDilateSize})
+		gocv.Dilate(fgMask, &fgMask, kernel)
+		kernel.Close()
+	}
 
-	// Шаг 3: NMS (в working-координатах)
-	afterNMS := nms(rawRects, c.NMSThreshold)
+	// Шаг 4: поиск контуров
+	contours := gocv.FindContours(fgMask, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours.Close()
 
-	// Шаг 4: bbox-коррекция + scale-back
-	afterAdjust := make([]image.Rectangle, len(afterNMS))
-	finalRects := make([]image.Rectangle, 0, len(afterNMS))
-	persons := make([]Person, 0, len(afterNMS))
+	fgPixels := 0
+	if withDebug {
+		fgPixels = gocv.CountNonZero(fgMask)
+	}
 
-	for i, r := range afterNMS {
-		adjusted := adjustRect(r, c.BboxXAdjust, c.BboxYAdjust, c.BboxWScale, c.BboxHScale)
-		afterAdjust[i] = adjusted
+	ct := cfg.Contour
+	rawContours := make([]image.Rectangle, 0)
+	persons := make([]Person, 0)
+	finalRects := make([]image.Rectangle, 0)
 
-		orig := adjusted
-		if scale != 1.0 {
-			orig = scaleRect(adjusted, 1.0/scale)
+	for i := 0; i < contours.Size(); i++ {
+		contour := contours.At(i)
+		area := gocv.ContourArea(contour)
+
+		r := gocv.BoundingRect(contour)
+		if withDebug {
+			rawContours = append(rawContours, r)
 		}
-		if orig.Dx() < c.MinWidth || orig.Dy() < c.MinHeight {
+
+		if area < ct.MinArea || area > ct.MaxArea {
 			continue
 		}
+
+		// Масштабируем bbox в координаты оригинального кадра
+		orig := r
+		if scale != 1.0 {
+			orig = scaleRect(r, 1.0/scale)
+		}
+
+		if orig.Dx() < ct.MinWidth || orig.Dy() < ct.MinHeight {
+			continue
+		}
+
 		finalRects = append(finalRects, orig)
 		persons = append(persons, Person{
 			BoundingBox: orig,
-			ImagePoint:  image.Point{X: orig.Min.X + orig.Dx()/2, Y: orig.Max.Y},
+			// Нижний центр bbox — точка пола под человеком
+			ImagePoint: image.Point{
+				X: orig.Min.X + orig.Dx()/2,
+				Y: orig.Max.Y,
+			},
 		})
 	}
 
 	result := DetectResult{Persons: persons}
 	if withDebug {
 		result.Debug = &DebugInfo{
-			WorkingSize:        workingSize,
-			WorkingScale:       scale,
-			RawRectsWorking:    rawRects,
-			AfterNMSWorking:    afterNMS,
-			AfterAdjustWorking: afterAdjust,
-			FinalRectsOriginal: finalRects,
+			WorkingSize:      image.Point{X: working.Cols(), Y: working.Rows()},
+			WorkingScale:     scale,
+			ForegroundPixels: fgPixels,
+			RawContours:      rawContours,
+			FinalRects:       finalRects,
 		}
 	}
 	return result
-}
-
-// adjustRect корректирует bbox HOG-детектора.
-// xAdj/yAdj — сдвиг левого верхнего угла в долях ширины/высоты.
-// wScale/hScale — масштаб размеров.
-func adjustRect(r image.Rectangle, xAdj, yAdj, wScale, hScale float64) image.Rectangle {
-	w := float64(r.Dx())
-	h := float64(r.Dy())
-	x := float64(r.Min.X) + xAdj*w
-	y := float64(r.Min.Y) + yAdj*h
-	return image.Rectangle{
-		Min: image.Point{X: int(x), Y: int(y)},
-		Max: image.Point{X: int(x + w*wScale), Y: int(y + h*hScale)},
-	}
 }
 
 func scaleRect(r image.Rectangle, s float64) image.Rectangle {
@@ -151,53 +182,10 @@ func scaleRect(r image.Rectangle, s float64) image.Rectangle {
 	}
 }
 
-// nms — Non-Maximum Suppression по IoU.
-func nms(rects []image.Rectangle, iouThreshold float64) []image.Rectangle {
-	if len(rects) == 0 {
-		return rects
-	}
-	sorted := make([]image.Rectangle, len(rects))
-	copy(sorted, rects)
-	sortByAreaDesc(sorted)
-
-	kept := make([]image.Rectangle, 0, len(sorted))
-	suppressed := make([]bool, len(sorted))
-	for i, a := range sorted {
-		if suppressed[i] {
-			continue
-		}
-		kept = append(kept, a)
-		for j := i + 1; j < len(sorted); j++ {
-			if !suppressed[j] && iou(a, sorted[j]) > iouThreshold {
-				suppressed[j] = true
-			}
-		}
-	}
-	return kept
-}
-
-func iou(a, b image.Rectangle) float64 {
-	inter := a.Intersect(b)
-	if inter.Empty() {
-		return 0
-	}
-	interArea := float64(inter.Dx() * inter.Dy())
-	unionArea := float64(a.Dx()*a.Dy()) + float64(b.Dx()*b.Dy()) - interArea
-	if unionArea <= 0 {
-		return 0
-	}
-	return interArea / unionArea
-}
-
-func sortByAreaDesc(rects []image.Rectangle) {
-	for i := 1; i < len(rects); i++ {
-		key := rects[i]
-		keyArea := key.Dx() * key.Dy()
-		j := i - 1
-		for j >= 0 && rects[j].Dx()*rects[j].Dy() < keyArea {
-			rects[j+1] = rects[j]
-			j--
-		}
-		rects[j+1] = key
+// drawDebug рисует bbox-ы детекций на кадре (для визуальной отладки).
+func drawDebug(img gocv.Mat, persons []Person) {
+	for _, p := range persons {
+		gocv.Rectangle(&img, p.BoundingBox, color.RGBA{0, 255, 0, 255}, 2)
+		gocv.Circle(&img, p.ImagePoint, 5, color.RGBA{255, 0, 0, 255}, -1)
 	}
 }
