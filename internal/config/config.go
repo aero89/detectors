@@ -34,6 +34,11 @@ type DNNConfig struct {
 	Config  string `yaml:"config"`
 	Classes string `yaml:"classes"`
 
+	// ModelFormat определяет формат выходного тензора.
+	// "yolov4" (default): (N, 5+classes) — YOLOv3/v4/v5 Darknet/ONNX
+	// "yolov8": (4+classes, N) — YOLOv8 ONNX (Ultralytics export)
+	ModelFormat string `yaml:"model_format"`
+
 	InputWidth    int     `yaml:"input_width"`
 	InputHeight   int     `yaml:"input_height"`
 	ConfThreshold float64 `yaml:"conf_threshold"`
@@ -117,6 +122,9 @@ func (c *Config) applyDefaults() {
 		d.MaxWidth = 960
 	}
 	dn := &d.DNN
+	if dn.ModelFormat == "" {
+		dn.ModelFormat = "yolov4"
+	}
 	if dn.InputWidth == 0 {
 		dn.InputWidth = 416
 	}

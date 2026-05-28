@@ -137,48 +137,15 @@ func (d *dnnDetector) parseDetections(outputs []gocv.Mat, workW, workH int, scal
 	var scores []float32
 
 	for _, output := range outputs {
-		for i := 0; i < output.Rows(); i++ {
-			row := output.RowRange(i, i+1)
-
-			if row.Cols() < 6 {
-				row.Close()
-				continue
-			}
-
-			// Находим класс с максимальным score среди всех классов
-			bestClass, bestClassScore := -1, float32(0)
-			for c := 5; c < row.Cols(); c++ {
-				if s := row.GetFloatAt(0, c); s > bestClassScore {
-					bestClassScore = s
-					bestClass = c - 5
-				}
-			}
-
-			if bestClass != dn.PersonClassID {
-				row.Close()
-				continue
-			}
-
-			// Итоговая уверенность = objectness × class_score (стандарт YOLO)
-			objectness := row.GetFloatAt(0, 4)
-			finalConf := float64(objectness) * float64(bestClassScore)
-			row.Close()
-
-			if finalConf < dn.ConfThreshold {
-				continue
-			}
-
-			// cx, cy, w, h в относительных координатах [0, 1]
-			cx := float64(output.GetFloatAt(i, 0)) * float64(workW)
-			cy := float64(output.GetFloatAt(i, 1)) * float64(workH)
-			bw := float64(output.GetFloatAt(i, 2)) * float64(workW)
-			bh := float64(output.GetFloatAt(i, 3)) * float64(workH)
-
-			x := int(cx - bw/2)
-			y := int(cy - bh/2)
-			boxes = append(boxes, image.Rect(x, y, x+int(bw), y+int(bh)))
-			scores = append(scores, float32(finalConf))
+		var b []image.Rectangle
+		var s []float32
+		if dn.ModelFormat == "yolov8" {
+			b, s = parseOutputYOLOv8(output, workW, workH, dn)
+		} else {
+			b, s = parseOutputYOLOv4(output, workW, workH, dn)
 		}
+		boxes = append(boxes, b...)
+		scores = append(scores, s...)
 	}
 
 	slog.Debug("dnn: raw detections", "count", len(boxes), "conf_threshold", dn.ConfThreshold)
@@ -206,6 +173,100 @@ func (d *dnnDetector) parseDetections(outputs []gocv.Mat, workW, workH int, scal
 		})
 	}
 	return persons, boxes, scores
+}
+
+// parseOutputYOLOv4 разбирает вывод YOLOv3/v4/v5 в формате (N_boxes, 5+classes).
+// Колонки: cx cy w h objectness class0 class1 ...
+// Координаты нормированы [0,1] относительно входного размера сети.
+func parseOutputYOLOv4(output gocv.Mat, workW, workH int, dn config.DNNConfig) ([]image.Rectangle, []float32) {
+	var boxes []image.Rectangle
+	var scores []float32
+
+	for i := 0; i < output.Rows(); i++ {
+		row := output.RowRange(i, i+1)
+
+		if row.Cols() < 6 {
+			row.Close()
+			continue
+		}
+
+		bestClass, bestClassScore := -1, float32(0)
+		for c := 5; c < row.Cols(); c++ {
+			if s := row.GetFloatAt(0, c); s > bestClassScore {
+				bestClassScore = s
+				bestClass = c - 5
+			}
+		}
+		if bestClass != dn.PersonClassID {
+			row.Close()
+			continue
+		}
+
+		objectness := row.GetFloatAt(0, 4)
+		finalConf := float64(objectness) * float64(bestClassScore)
+		row.Close()
+
+		if finalConf < dn.ConfThreshold {
+			continue
+		}
+
+		cx := float64(output.GetFloatAt(i, 0)) * float64(workW)
+		cy := float64(output.GetFloatAt(i, 1)) * float64(workH)
+		bw := float64(output.GetFloatAt(i, 2)) * float64(workW)
+		bh := float64(output.GetFloatAt(i, 3)) * float64(workH)
+
+		x := int(cx - bw/2)
+		y := int(cy - bh/2)
+		boxes = append(boxes, image.Rect(x, y, x+int(bw), y+int(bh)))
+		scores = append(scores, float32(finalConf))
+	}
+	return boxes, scores
+}
+
+// parseOutputYOLOv8 разбирает вывод YOLOv8 ONNX в формате (4+classes, N_boxes).
+// Строки: cx cy w h class0 class1 ...
+// Координаты в пикселях входного изображения (нужно делить на InputWidth/Height).
+// Objectness отсутствует — confidence = max(class_scores).
+func parseOutputYOLOv8(output gocv.Mat, workW, workH int, dn config.DNNConfig) ([]image.Rectangle, []float32) {
+	var boxes []image.Rectangle
+	var scores []float32
+
+	numAttrs := output.Rows() // 4 + num_classes (84 для COCO)
+	numBoxes := output.Cols() // число предсказаний (8400 для 640×640)
+
+	if numAttrs < 5 || numBoxes == 0 {
+		slog.Warn("dnn: unexpected YOLOv8 output shape", "rows", numAttrs, "cols", numBoxes)
+		return nil, nil
+	}
+
+	for boxIdx := 0; boxIdx < numBoxes; boxIdx++ {
+		bestClass, bestConf := -1, float32(0)
+		for c := 4; c < numAttrs; c++ {
+			if s := output.GetFloatAt(c, boxIdx); s > bestConf {
+				bestConf = s
+				bestClass = c - 4
+			}
+		}
+
+		if bestClass != dn.PersonClassID {
+			continue
+		}
+		if float64(bestConf) < dn.ConfThreshold {
+			continue
+		}
+
+		// Координаты в пикселях входного изображения → нормируем → рабочий размер
+		cx := float64(output.GetFloatAt(0, boxIdx)) / float64(dn.InputWidth) * float64(workW)
+		cy := float64(output.GetFloatAt(1, boxIdx)) / float64(dn.InputHeight) * float64(workH)
+		bw := float64(output.GetFloatAt(2, boxIdx)) / float64(dn.InputWidth) * float64(workW)
+		bh := float64(output.GetFloatAt(3, boxIdx)) / float64(dn.InputHeight) * float64(workH)
+
+		x := int(cx - bw/2)
+		y := int(cy - bh/2)
+		boxes = append(boxes, image.Rect(x, y, x+int(bw), y+int(bh)))
+		scores = append(scores, bestConf)
+	}
+	return boxes, scores
 }
 
 // unconnectedLayerNames возвращает имена выходных слоёв сети.

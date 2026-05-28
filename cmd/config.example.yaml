@@ -15,28 +15,41 @@ detector:
   max_width: 960
 
   dnn:
-    # Файлы модели (должны быть в папке models/ рядом с бинарником).
-    #
-    # Скачать YOLOv4-tiny (~23 MB):
-    #   wget https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4-tiny.weights -P models/
-    #   wget https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4-tiny.cfg -P models/
-    #   wget https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names -P models/
-    model:   "/app/models/yolov4-tiny.weights"
-    config:  "/app/models/yolov4-tiny.cfg"
-    classes: "/app/models/coco.names"
-
-    # Размер входа сети. YOLOv4-tiny: 416. Больше → точнее, медленнее.
+    # ── Вариант A: YOLOv4-tiny (быстрый, ~23 MB) ──────────────────────────
+    #   wget <darknet-releases>/yolov4-tiny.weights -P models/
+    #   wget <darknet-master>/cfg/yolov4-tiny.cfg   -P models/
+    #   wget <darknet-master>/data/coco.names        -P models/
+    model:        "/app/models/yolov4-tiny.weights"
+    config:       "/app/models/yolov4-tiny.cfg"
+    classes:      "/app/models/coco.names"
+    model_format: "yolov4"   # yolov4 | yolov8
     input_width:  416
     input_height: 416
 
+    # ── Вариант B: YOLOv4 full (точнее, ~256 MB) ──────────────────────────
+    # model:        "/app/models/yolov4.weights"
+    # config:       "/app/models/yolov4.cfg"
+    # model_format: "yolov4"
+    # input_width:  608
+    # input_height: 608
+
+    # ── Вариант C: YOLOv8n ONNX (современный, ~6 MB) ──────────────────────
+    # pip install ultralytics && yolo export model=yolov8n.pt format=onnx
+    # — или скачать готовый yolov8n.onnx из релизов Ultralytics
+    # model:        "/app/models/yolov8n.onnx"
+    # config:       ""
+    # classes:      "/app/models/coco.names"
+    # model_format: "yolov8"
+    # input_width:  640
+    # input_height: 640
+
     # Минимальная уверенность детекции (0–1).
-    # objectness × class_score должен превышать этот порог.
     # YOLO обучен на фронтальных снимках — с камеры под углом сверху
-    # confidence ниже, чем на обычных фото. Рекомендуется 0.1–0.2.
+    # confidence ниже. Для фронтальной/обычной камеры: 0.4–0.5.
     conf_threshold: 0.15
     nms_threshold:  0.4
 
-    # ID класса «человек» в модели. В COCO (YOLOv4): 0.
+    # ID класса «человек» в модели. В COCO: 0.
     person_class_id: 0
 
     # backend: 0=auto  3=opencv(cpu)  5=cuda
