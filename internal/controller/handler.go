@@ -1,39 +1,34 @@
 package controller
 
 import (
-	"hm-detector/internal/detector"
 	"image"
+	"io"
 	"log/slog"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
-	"gocv.io/x/gocv"
+	"hm-detector/internal/detector"
 	"hm-detector/internal/homography"
 )
 
-// DetectHandler обрабатывает POST /detect.
 type DetectHandler struct {
-	Detector   *detector.Detector
+	Detector   detector.Detector
 	Homography *homography.Homography
 }
 
-// DetectResponse — ответ ручки /detect.
 type DetectResponse struct {
 	Persons   []detector.Person   `json:"persons"`
 	FrameSize image.Point         `json:"frame_size"`
 	Debug     *detector.DebugInfo `json:"debug,omitempty"`
 }
 
-// Detect принимает изображение и возвращает список обнаруженных людей.
+// Detect принимает изображение и возвращает список людей.
 //
-// Принимает изображение двумя способами:
+// Способы передачи:
 //   - multipart/form-data: поле "image"
 //   - любой другой Content-Type: тело запроса целиком
 //
-// Добавь ?debug=true чтобы получить промежуточные данные каждого шага:
-//
-//	curl -X POST "http://localhost:8080/detect?debug=true" \
-//	     --data-binary @frame.jpg -H "Content-Type: image/jpeg" | jq .debug
+// ?debug=true — добавить промежуточные данные в ответ.
 func (h *DetectHandler) Detect(c *fiber.Ctx) error {
 	withDebug := c.QueryBool("debug", false)
 
@@ -42,33 +37,46 @@ func (h *DetectHandler) Detect(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "read image: " + err.Error()})
 	}
 
-	mat, err := gocv.IMDecode(imgBytes, gocv.IMReadColor)
-	if err != nil || mat.Empty() {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "failed to decode image"})
+	result, err := h.Detector.Detect(imgBytes, withDebug)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	defer mat.Close()
-
-	result := h.Detector.Detect(mat, withDebug)
 
 	if h.Homography != nil {
 		for i := range result.Persons {
 			p := result.Persons[i].ImagePoint
-			rp := h.Homography.Transform(homography.Point2D{
-				X: float64(p.X),
-				Y: float64(p.Y),
-			})
+			rp := h.Homography.Transform(homography.Point2D{X: float64(p.X), Y: float64(p.Y)})
 			result.Persons[i].RoomPoint = &rp
 		}
 	}
 
-	slog.Info("detect", "persons", len(result.Persons),
-		"frame_w", mat.Cols(), "frame_h", mat.Rows(), "debug", withDebug)
+	frameSize := frameSizeFromDebug(result.Debug, imgBytes)
+	slog.Info("detect", "persons", len(result.Persons))
 
 	return c.JSON(DetectResponse{
 		Persons:   result.Persons,
-		FrameSize: image.Point{X: mat.Cols(), Y: mat.Rows()},
+		FrameSize: frameSize,
 		Debug:     result.Debug,
 	})
+}
+
+func frameSizeFromDebug(dbg *detector.DebugInfo, imgBytes []byte) image.Point {
+	if dbg != nil && dbg.WorkingScale > 0 && dbg.WorkingScale != 1.0 {
+		return image.Point{
+			X: int(float64(dbg.WorkingSize.X) / dbg.WorkingScale),
+			Y: int(float64(dbg.WorkingSize.Y) / dbg.WorkingScale),
+		}
+	}
+	if dbg != nil {
+		return dbg.WorkingSize
+	}
+	// Без debug: быстрый декод для получения размера
+	if mat, err := detector.DecodeImage(imgBytes); err == nil {
+		sz := image.Point{X: mat.Cols(), Y: mat.Rows()}
+		mat.Close()
+		return sz
+	}
+	return image.Point{}
 }
 
 func readImageBytes(c *fiber.Ctx) ([]byte, error) {
@@ -84,10 +92,8 @@ func readImageBytes(c *fiber.Ctx) ([]byte, error) {
 		}
 		defer f.Close()
 		buf := make([]byte, file.Size)
-		if _, err := f.Read(buf); err != nil {
-			return nil, err
-		}
-		return buf, nil
+		_, err = io.ReadFull(f, buf)
+		return buf, err
 	}
 	return c.Body(), nil
 }

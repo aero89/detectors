@@ -1,0 +1,8 @@
+# Файлы моделей — большие бинарники, не коммитим
+models/*.weights
+models/*.onnx
+models/*.pb
+models/*.caffemodel
+# Конфиг с реальными данными
+cmd/config.yaml
+config.yaml
