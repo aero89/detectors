@@ -37,9 +37,11 @@ func newDNNDetector(cfg config.DetectorConfig) (*dnnDetector, error) {
 		if dn.Config == "" {
 			return nil, fmt.Errorf("dnn.config (.cfg file) is required for Darknet models")
 		}
-		net = gocv.ReadNetFromDarknet(dn.Config, dn.Model)
+		// ReadNet(model, config) — универсальный загрузчик OpenCV DNN,
+		// определяет формат по расширению файла.
+		net = gocv.ReadNet(dn.Model, dn.Config)
 	case ".onnx":
-		net = gocv.ReadNetFromONNX(dn.Model)
+		net = gocv.ReadNet(dn.Model, "")
 	default:
 		return nil, fmt.Errorf("unsupported model format %q (expected .weights or .onnx)", ext)
 	}
