@@ -146,7 +146,7 @@ func (c *Config) applyDefaults() {
 		d.NMSThreshold = 0.65
 	}
 	if d.MaxWidth == 0 {
-		d.MaxWidth = 640
+		d.MaxWidth = 1280
 	}
 	if d.BboxXAdjust == 0 {
 		d.BboxXAdjust = 0.1
