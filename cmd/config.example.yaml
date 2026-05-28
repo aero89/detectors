@@ -30,7 +30,9 @@ detector:
     input_height: 416
 
     # Минимальная уверенность детекции (0–1).
-    conf_threshold: 0.5
+    # objectness × class_score должен превышать этот порог.
+    # YOLOv4-tiny с камеры под углом: 0.3–0.4 даёт больше срабатываний.
+    conf_threshold: 0.35
     nms_threshold:  0.4
 
     # ID класса «человек» в модели. В COCO (YOLOv4): 0.

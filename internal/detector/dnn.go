@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"image"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,12 +89,25 @@ func (d *dnnDetector) Detect(imgBytes []byte, withDebug bool) (DetectResult, err
 	d.net.SetInput(blob, "")
 
 	outNames := unconnectedLayerNames(d.net)
+	slog.Debug("dnn: running forward", "layers", outNames)
 	outputs := d.net.ForwardLayers(outNames)
 	defer func() {
 		for i := range outputs {
 			outputs[i].Close()
 		}
 	}()
+
+	var layerDims []map[string]any
+	for i, out := range outputs {
+		dims := map[string]any{
+			"name": outNames[i],
+			"rows": out.Rows(),
+			"cols": out.Cols(),
+			"type": int(out.Type()),
+		}
+		layerDims = append(layerDims, dims)
+		slog.Debug("dnn: output layer", "name", outNames[i], "rows", out.Rows(), "cols", out.Cols(), "type", out.Type())
+	}
 
 	persons, rawBoxes, rawScores := d.parseDetections(outputs, working.Cols(), working.Rows(), scale)
 
@@ -107,6 +121,8 @@ func (d *dnnDetector) Detect(imgBytes []byte, withDebug bool) (DetectResult, err
 				"raw_boxes_count": len(rawBoxes),
 				"raw_boxes":       rawBoxes,
 				"raw_scores":      rawScores,
+				"layer_dims":      layerDims,
+				"conf_threshold":  dn.ConfThreshold,
 			},
 		}
 	}
@@ -121,28 +137,33 @@ func (d *dnnDetector) parseDetections(outputs []gocv.Mat, workW, workH int, scal
 	var scores []float32
 
 	for _, output := range outputs {
-		cols := output.Cols()
-		if cols < 6 {
-			continue
-		}
-
 		for i := 0; i < output.Rows(); i++ {
+			row := output.RowRange(i, i+1)
+
+			if row.Cols() < 6 {
+				row.Close()
+				continue
+			}
+
 			// Находим класс с максимальным score среди всех классов
-			bestClass, bestClassScore := 0, float32(0)
-			for c := 5; c < cols; c++ {
-				if s := output.GetFloatAt(i, c); s > bestClassScore {
+			bestClass, bestClassScore := -1, float32(0)
+			for c := 5; c < row.Cols(); c++ {
+				if s := row.GetFloatAt(0, c); s > bestClassScore {
 					bestClassScore = s
 					bestClass = c - 5
 				}
 			}
 
 			if bestClass != dn.PersonClassID {
+				row.Close()
 				continue
 			}
 
 			// Итоговая уверенность = objectness × class_score (стандарт YOLO)
-			objectness := output.GetFloatAt(i, 4)
-			finalConf := float64(objectness * bestClassScore)
+			objectness := row.GetFloatAt(0, 4)
+			finalConf := float64(objectness) * float64(bestClassScore)
+			row.Close()
+
 			if finalConf < dn.ConfThreshold {
 				continue
 			}
@@ -160,11 +181,14 @@ func (d *dnnDetector) parseDetections(outputs []gocv.Mat, workW, workH int, scal
 		}
 	}
 
+	slog.Debug("dnn: raw detections", "count", len(boxes), "conf_threshold", dn.ConfThreshold)
 	if len(boxes) == 0 {
+		slog.Warn("dnn: no detections passed threshold", "conf_threshold", dn.ConfThreshold)
 		return nil, nil, nil
 	}
 
 	indices := gocv.NMSBoxes(boxes, scores, float32(dn.ConfThreshold), float32(dn.NMSThreshold))
+	slog.Debug("dnn: after NMS", "count", len(indices))
 
 	persons := make([]Person, 0, len(indices))
 	for _, idx := range indices {
