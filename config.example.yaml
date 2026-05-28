@@ -2,37 +2,57 @@ server:
   addr: ":8080"
 
 detector:
-  # Ширина рабочего кадра. Bbox-ы возвращаются в координатах оригинала.
-  # 0 = без ресайза. Для 1920×1080 значение 960 даёт хороший баланс.
+  # Алгоритм детекции: "dnn" или "backsub"
+  #
+  # dnn     — нейросеть (YOLO). Работает на одном кадре, не зависит от угла
+  #           камеры, видит неподвижных людей. Требует файлы модели.
+  #           Рекомендуется для камеры в углу помещения.
+  #
+  # backsub — вычитание фона (MOG2). Не требует модели, быстрее,
+  #           но видит только движущихся людей.
+  method: "dnn"
+
+  # Ширина рабочего кадра для детекции. Bbox-ы возвращаются в оригинальных координатах.
+  # Для DNN: 960 даёт хороший баланс. Для backsub: 640–960.
   max_width: 960
 
+  dnn:
+    # Скачать модель (пример YOLOv4-tiny, ~23 MB):
+    #   wget https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4-tiny.weights
+    #   wget https://raw.githubusercontent.com/AlexeyAB/darknet/master/cfg/yolov4-tiny.cfg
+    #   wget https://raw.githubusercontent.com/pjreddie/darknet/master/data/coco.names
+    model:   "models/yolov4-tiny.weights"
+    config:  "models/yolov4-tiny.cfg"
+    classes: "models/coco.names"
+
+    # Размер входа сети. YOLOv4-tiny: 416. Больше → точнее, медленнее.
+    input_width:  416
+    input_height: 416
+
+    # Минимальная уверенность детекции (0–1). Выше → меньше ложных.
+    conf_threshold: 0.5
+    # Порог IoU для NMS внутри сети.
+    nms_threshold: 0.4
+
+    # ID класса «человек». В COCO (YOLOv4, YOLOv8): 0.
+    person_class_id: 0
+
+    # backend: 0=auto 3=opencv(cpu) 5=cuda
+    # target:  0=cpu  6=cuda
+    backend: 0
+    target: 0
+
+  # backsub используется если method: "backsub"
   back_sub:
-    # Количество кадров для построения модели фона.
-    # Первые ~history кадров детекция нестабильна — это нормально.
     history: 500
-
-    # Порог чувствительности. Меньше → реагирует на малейшее движение (больше шума).
-    # Больше → реагирует только на явное движение (может пропускать медленных людей).
     var_threshold: 25
-
-    # Тени: false — быстрее, тени попадают в маску как передний план.
-    # true — тени окрашиваются отдельно и исключаются, но медленнее.
     detect_shadows: false
-
-    # Эрозия убирает мелкий шум (одиночные пиксели). 0 = выключено.
     morph_erode_size: 3
-
-    # Дилатация заполняет дыры внутри силуэта человека и объединяет фрагменты.
-    # Увеличьте если человек распадается на несколько контуров.
     morph_dilate_size: 20
 
   contour:
-    # Площадь контура в пикселях рабочего кадра (после max_width ресайза).
-    # Слишком маленький контур — шум или тень; слишком большой — группа людей.
     min_area: 500
     max_area: 80000
-
-    # Минимальный размер bbox в пикселях оригинального кадра.
     min_width: 30
     min_height: 30
 
