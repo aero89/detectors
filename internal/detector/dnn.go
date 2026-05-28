@@ -223,26 +223,38 @@ func parseOutputYOLOv4(output gocv.Mat, workW, workH int, dn config.DNNConfig) (
 	return boxes, scores
 }
 
-// parseOutputYOLOv8 разбирает вывод YOLOv8 ONNX в формате (4+classes, N_boxes).
-// Строки: cx cy w h class0 class1 ...
-// Координаты в пикселях входного изображения (нужно делить на InputWidth/Height).
-// Objectness отсутствует — confidence = max(class_scores).
+// parseOutputYOLOv8 разбирает вывод YOLOv8 ONNX.
+// Сеть отдаёт 3D тензор (1, 4+classes, N_boxes); Reshape превращает его
+// в 2D (numAttrs, numBoxes). Objectness отсутствует — confidence = max(class_scores).
+// Координаты в пикселях входного изображения (делятся на InputWidth/Height).
 func parseOutputYOLOv8(output gocv.Mat, workW, workH int, dn config.DNNConfig) ([]image.Rectangle, []float32) {
-	var boxes []image.Rectangle
-	var scores []float32
+	dims := output.Size()
+	slog.Debug("dnn: yolov8 raw output", "dims", dims)
 
-	numAttrs := output.Rows() // 4 + num_classes (84 для COCO)
-	numBoxes := output.Cols() // число предсказаний (8400 для 640×640)
-
-	if numAttrs < 5 || numBoxes == 0 {
-		slog.Warn("dnn: unexpected YOLOv8 output shape", "rows", numAttrs, "cols", numBoxes)
+	if len(dims) < 2 {
+		slog.Warn("dnn: unexpected YOLOv8 output dims", "dims", dims)
 		return nil, nil
 	}
+
+	// 3D (1, numAttrs, numBoxes) → 2D (numAttrs, numBoxes)
+	mat := output.Reshape(1, dims[len(dims)-2])
+	defer mat.Close()
+
+	numAttrs := mat.Rows() // 84 для COCO (4 bbox + 80 classes)
+	numBoxes := mat.Cols() // 8400 для 640×640
+
+	if numAttrs < 5 || numBoxes == 0 {
+		slog.Warn("dnn: unexpected YOLOv8 shape after reshape", "rows", numAttrs, "cols", numBoxes, "dims", dims)
+		return nil, nil
+	}
+
+	var boxes []image.Rectangle
+	var scores []float32
 
 	for boxIdx := 0; boxIdx < numBoxes; boxIdx++ {
 		bestClass, bestConf := -1, float32(0)
 		for c := 4; c < numAttrs; c++ {
-			if s := output.GetFloatAt(c, boxIdx); s > bestConf {
+			if s := mat.GetFloatAt(c, boxIdx); s > bestConf {
 				bestConf = s
 				bestClass = c - 4
 			}
@@ -255,11 +267,11 @@ func parseOutputYOLOv8(output gocv.Mat, workW, workH int, dn config.DNNConfig) (
 			continue
 		}
 
-		// Координаты в пикселях входного изображения → нормируем → рабочий размер
-		cx := float64(output.GetFloatAt(0, boxIdx)) / float64(dn.InputWidth) * float64(workW)
-		cy := float64(output.GetFloatAt(1, boxIdx)) / float64(dn.InputHeight) * float64(workH)
-		bw := float64(output.GetFloatAt(2, boxIdx)) / float64(dn.InputWidth) * float64(workW)
-		bh := float64(output.GetFloatAt(3, boxIdx)) / float64(dn.InputHeight) * float64(workH)
+		// Координаты в пикселях входного изображения → масштаб рабочего кадра
+		cx := float64(mat.GetFloatAt(0, boxIdx)) / float64(dn.InputWidth) * float64(workW)
+		cy := float64(mat.GetFloatAt(1, boxIdx)) / float64(dn.InputHeight) * float64(workH)
+		bw := float64(mat.GetFloatAt(2, boxIdx)) / float64(dn.InputWidth) * float64(workW)
+		bh := float64(mat.GetFloatAt(3, boxIdx)) / float64(dn.InputHeight) * float64(workH)
 
 		x := int(cx - bw/2)
 		y := int(cy - bh/2)
