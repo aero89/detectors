@@ -17,6 +17,30 @@ type Person struct {
 	RoomPoint   *homography.Point2D `json:"room_point,omitempty"`
 }
 
+// DetectResult — полный результат детекции, включая опциональный дебаг.
+type DetectResult struct {
+	Persons []Person    `json:"persons"`
+	Debug   *DebugInfo  `json:"debug,omitempty"`
+}
+
+// DebugInfo показывает промежуточные данные каждого шага пайплайна.
+// Используйте ?debug=true чтобы получить его в ответе.
+type DebugInfo struct {
+	// Размер кадра, поданного в HOG (после ресайза)
+	WorkingSize image.Point `json:"working_size"`
+	// Коэффициент масштабирования: working / original
+	// 1.0 = ресайз не применялся
+	WorkingScale float64 `json:"working_scale"`
+	// Сырые боксы от HOG — в координатах working (до любых поправок)
+	RawRectsWorking []image.Rectangle `json:"raw_rects_working"`
+	// После NMS, в координатах working (до bbox-коррекции и scale-back)
+	AfterNMSWorking []image.Rectangle `json:"after_nms_working"`
+	// После bbox-коррекции, в координатах working
+	AfterAdjustWorking []image.Rectangle `json:"after_adjust_working"`
+	// Итоговые боксы в координатах оригинального кадра
+	FinalRectsOriginal []image.Rectangle `json:"final_rects_original"`
+}
+
 // Detector детектирует людей с помощью HOG + LinearSVM.
 type Detector struct {
 	hog gocv.HOGDescriptor
@@ -33,17 +57,12 @@ func (d *Detector) Close() {
 	d.hog.Close()
 }
 
-// Detect возвращает список людей на кадре в координатах оригинального изображения.
-//
-// Pipeline:
-//  1. Ресайз кадра до max_width (основное ускорение).
-//  2. HOG DetectMultiScale с groupRectangles (finalThreshold).
-//  3. IoU NMS — убирает оставшиеся дубли.
-//  4. Масштабирование bbox обратно в оригинальные координаты.
-func (d *Detector) Detect(img gocv.Mat) []Person {
+// Detect запускает пайплайн детекции.
+// withDebug=true заполняет DetectResult.Debug промежуточными данными каждого шага.
+func (d *Detector) Detect(img gocv.Mat, withDebug bool) DetectResult {
 	c := d.cfg
 
-	// Масштабируем кадр вниз если шире max_width
+	// Шаг 1: ресайз до max_width
 	scale := 1.0
 	working := img
 	var resized gocv.Mat
@@ -56,10 +75,12 @@ func (d *Detector) Detect(img gocv.Mat) []Person {
 		defer resized.Close()
 	}
 
+	workingSize := image.Point{X: working.Cols(), Y: working.Rows()}
+
+	// Шаг 2: HOG
 	winStride := image.Point{X: c.WinStrideX, Y: c.WinStrideY}
 	padding := image.Point{X: c.PaddingX, Y: c.PaddingY}
-
-	rects := d.hog.DetectMultiScaleWithParams(
+	rawRects := d.hog.DetectMultiScaleWithParams(
 		working,
 		c.HitThreshold,
 		winStride,
@@ -69,25 +90,44 @@ func (d *Detector) Detect(img gocv.Mat) []Person {
 		false,
 	)
 
-	rects = nms(rects, c.NMSThreshold)
+	// Шаг 3: NMS (в working-координатах)
+	afterNMS := nms(rawRects, c.NMSThreshold)
 
-	persons := make([]Person, 0, len(rects))
-	for _, r := range rects {
-		// Коррекция смещения/размера HOG bbox
-		r = adjustRect(r, c.BboxXAdjust, c.BboxYAdjust, c.BboxWScale, c.BboxHScale)
-		// Масштабируем bbox обратно в координаты оригинального кадра
+	// Шаг 4: bbox-коррекция + scale-back
+	afterAdjust := make([]image.Rectangle, len(afterNMS))
+	finalRects := make([]image.Rectangle, 0, len(afterNMS))
+	persons := make([]Person, 0, len(afterNMS))
+
+	for i, r := range afterNMS {
+		adjusted := adjustRect(r, c.BboxXAdjust, c.BboxYAdjust, c.BboxWScale, c.BboxHScale)
+		afterAdjust[i] = adjusted
+
+		orig := adjusted
 		if scale != 1.0 {
-			r = scaleRect(r, 1.0/scale)
+			orig = scaleRect(adjusted, 1.0/scale)
 		}
-		if r.Dx() < c.MinWidth || r.Dy() < c.MinHeight {
+		if orig.Dx() < c.MinWidth || orig.Dy() < c.MinHeight {
 			continue
 		}
+		finalRects = append(finalRects, orig)
 		persons = append(persons, Person{
-			BoundingBox: r,
-			ImagePoint:  image.Point{X: r.Min.X + r.Dx()/2, Y: r.Max.Y},
+			BoundingBox: orig,
+			ImagePoint:  image.Point{X: orig.Min.X + orig.Dx()/2, Y: orig.Max.Y},
 		})
 	}
-	return persons
+
+	result := DetectResult{Persons: persons}
+	if withDebug {
+		result.Debug = &DebugInfo{
+			WorkingSize:        workingSize,
+			WorkingScale:       scale,
+			RawRectsWorking:    rawRects,
+			AfterNMSWorking:    afterNMS,
+			AfterAdjustWorking: afterAdjust,
+			FinalRectsOriginal: finalRects,
+		}
+	}
+	return result
 }
 
 // adjustRect корректирует bbox HOG-детектора.
@@ -112,7 +152,6 @@ func scaleRect(r image.Rectangle, s float64) image.Rectangle {
 }
 
 // nms — Non-Maximum Suppression по IoU.
-// Из группы перекрывающихся боксов оставляет наибольший по площади.
 func nms(rects []image.Rectangle, iouThreshold float64) []image.Rectangle {
 	if len(rects) == 0 {
 		return rects
@@ -123,7 +162,6 @@ func nms(rects []image.Rectangle, iouThreshold float64) []image.Rectangle {
 
 	kept := make([]image.Rectangle, 0, len(sorted))
 	suppressed := make([]bool, len(sorted))
-
 	for i, a := range sorted {
 		if suppressed[i] {
 			continue

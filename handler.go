@@ -20,20 +20,22 @@ type DetectHandler struct {
 type DetectResponse struct {
 	Persons   []Person    `json:"persons"`
 	FrameSize image.Point `json:"frame_size"`
+	Debug     *DebugInfo  `json:"debug,omitempty"`
 }
 
-// Detect принимает изображение и возвращает список обнаруженных людей
-// с позициями в пикселях и в координатах помещения.
+// Detect принимает изображение и возвращает список обнаруженных людей.
 //
 // Принимает изображение двумя способами:
 //   - multipart/form-data: поле "image"
 //   - любой другой Content-Type: тело запроса целиком
 //
-// Пример:
+// Добавь ?debug=true чтобы получить промежуточные данные каждого шага:
 //
-//	curl -X POST http://localhost:8080/detect \
-//	     --data-binary @frame.jpg -H "Content-Type: image/jpeg"
+//	curl -X POST "http://localhost:8080/detect?debug=true" \
+//	     --data-binary @frame.jpg -H "Content-Type: image/jpeg" | jq .debug
 func (h *DetectHandler) Detect(c *fiber.Ctx) error {
+	withDebug := c.QueryBool("debug", false)
+
 	imgBytes, err := readImageBytes(c)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "read image: " + err.Error()})
@@ -45,25 +47,26 @@ func (h *DetectHandler) Detect(c *fiber.Ctx) error {
 	}
 	defer mat.Close()
 
-	persons := h.detector.Detect(mat)
+	result := h.detector.Detect(mat, withDebug)
 
 	if h.homography != nil {
-		for i := range persons {
-			p := persons[i].ImagePoint
+		for i := range result.Persons {
+			p := result.Persons[i].ImagePoint
 			rp := h.homography.Transform(homography.Point2D{
 				X: float64(p.X),
 				Y: float64(p.Y),
 			})
-			persons[i].RoomPoint = &rp
+			result.Persons[i].RoomPoint = &rp
 		}
 	}
 
-	slog.Info("detect", "persons", len(persons),
-		"frame_w", mat.Cols(), "frame_h", mat.Rows())
+	slog.Info("detect", "persons", len(result.Persons),
+		"frame_w", mat.Cols(), "frame_h", mat.Rows(), "debug", withDebug)
 
 	return c.JSON(DetectResponse{
-		Persons:   persons,
+		Persons:   result.Persons,
 		FrameSize: image.Point{X: mat.Cols(), Y: mat.Rows()},
+		Debug:     result.Debug,
 	})
 }
 
