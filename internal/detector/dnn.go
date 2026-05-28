@@ -121,44 +121,42 @@ func (d *dnnDetector) parseDetections(outputs []gocv.Mat, workW, workH int, scal
 	var scores []float32
 
 	for _, output := range outputs {
+		cols := output.Cols()
+		if cols < 6 {
+			continue
+		}
+
 		for i := 0; i < output.Rows(); i++ {
-			row := output.RowRange(i, i+1)
-			if row.Cols() < 5 {
-				row.Close()
-				continue
-			}
-
-			confidence := float64(row.GetFloatAt(0, 4))
-			if confidence < dn.ConfThreshold {
-				row.Close()
-				continue
-			}
-
-			bestClass, bestScore := 0, float32(0)
-			for c := 5; c < row.Cols(); c++ {
-				if s := row.GetFloatAt(0, c); s > bestScore {
-					bestScore = s
+			// Находим класс с максимальным score среди всех классов
+			bestClass, bestClassScore := 0, float32(0)
+			for c := 5; c < cols; c++ {
+				if s := output.GetFloatAt(i, c); s > bestClassScore {
+					bestClassScore = s
 					bestClass = c - 5
 				}
 			}
-			row.Close()
 
 			if bestClass != dn.PersonClassID {
 				continue
 			}
-			if float64(bestScore)*confidence < dn.ConfThreshold {
+
+			// Итоговая уверенность = objectness × class_score (стандарт YOLO)
+			objectness := output.GetFloatAt(i, 4)
+			finalConf := float64(objectness * bestClassScore)
+			if finalConf < dn.ConfThreshold {
 				continue
 			}
 
+			// cx, cy, w, h в относительных координатах [0, 1]
 			cx := float64(output.GetFloatAt(i, 0)) * float64(workW)
 			cy := float64(output.GetFloatAt(i, 1)) * float64(workH)
-			w := float64(output.GetFloatAt(i, 2)) * float64(workW)
-			h := float64(output.GetFloatAt(i, 3)) * float64(workH)
+			bw := float64(output.GetFloatAt(i, 2)) * float64(workW)
+			bh := float64(output.GetFloatAt(i, 3)) * float64(workH)
 
-			x := int(cx - w/2)
-			y := int(cy - h/2)
-			boxes = append(boxes, image.Rect(x, y, x+int(w), y+int(h)))
-			scores = append(scores, bestScore*float32(confidence))
+			x := int(cx - bw/2)
+			y := int(cy - bh/2)
+			boxes = append(boxes, image.Rect(x, y, x+int(bw), y+int(bh)))
+			scores = append(scores, float32(finalConf))
 		}
 	}
 
